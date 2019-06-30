@@ -1076,8 +1076,11 @@ EOF""")
                 kws.update(target.kws)
 
 
-                # keep console more or less clean, so we can easily parse it
-                target.shell.run("dmesg -l alert")
+                # keep console more or less clean, so we can easily
+                # parse it, otherwise kernel drivers loading deferred
+                # will randomly "corrupt" our output. Note kernel
+                # panics still will go through.
+                target.shell.run("dmesg -n alert")
                 self._fsinfo_load()
 
                 # List the available images and decide if we have the

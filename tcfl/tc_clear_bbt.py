@@ -610,7 +610,6 @@ EOF
         # As well, swupd doesn't seem to be able to recover well from
         # network glitches--so we do a loop where we retry a few times;
         # we record how many tries we did and the time it took as KPIs
-        self.tls.expecter.timeout = 240
         for bundle in bundles:
             if self.swupd_debug:
                 debug = "--debug"
@@ -625,7 +624,8 @@ EOF
                 # STDERR section
                 output = target.shell.run(
                     "time -p swupd bundle-add %s %s || echo FAILED''-%s"
-                    % (debug, bundle, self.kws['tc_hash']), output = True)
+                    % (debug, bundle, self.kws['tc_hash']), output = True,
+                    timeout = 240)
                 if not 'FAILED-%(tc_hash)s' % self.kws in output:
                     # we assume it worked
                     break

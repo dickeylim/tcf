@@ -82,6 +82,8 @@ target lock--note this does not conflict with other users, as the
 tickets are namespaced per-user. This allows the server log to be used
 to crossreference what was being ran, to sort out issues.
 
+The *hash* length (number of characters used) is controlled by
+:data:`tcfl.tc.tc_c.hashid_len`.
 """
 import ast
 import atexit
@@ -280,7 +282,7 @@ class skip_e(exception):
 #:
 #: - *skip*: the testcase has detected a condition that deems it not
 #:   applicable and thus shall be skipped (raise
-#    :py:exc:`tcfl.tc.skipped_e`)
+#:   :py:exc:`tcfl.tc.skip_e`)
 valid_results = dict(
     PASS = ( 'pass', 'passed' ),
     ERRR = ( 'error', 'errored' ),
@@ -1651,7 +1653,8 @@ class target_group_c(object):
         self._targets = targets
         return targets
 
-assign_period = 2
+assign_period = 5
+poll_period = 0.25
 
 class result_c():
     def __init__(self, passed = 0, errors = 0, failed = 0,
@@ -1894,6 +1897,17 @@ class result_c():
         return result
 
     @staticmethod
+    def from_exception_cpe(tc, e, result_e = error_e):
+        return result_c.report_from_exception(
+            tc, e, attachments = {
+                "output": e.output,
+                "return": e.returncode,
+                "cmd": e.cmd
+            },
+            force_result = result_e
+        )
+
+    @staticmethod
     def from_exception(fn):
         """
         Call a phase function to translate exceptions into
@@ -1919,13 +1933,7 @@ class result_c():
             # Some exceptions that are common and we know about, so we
             # can print some more info that will be helpful
             except subprocess.CalledProcessError as e:
-                return result_c.report_from_exception(
-                    _tc, e, attachments = {
-                        "output": e.output,
-                        "return": e.returncode,
-                        "cmd": e.cmd
-                    }, force_result = error_e
-                )
+                return result_c.from_exception_cpe(_tc, e)
             except OSError as e:
                 attachments = dict(
                     errno = e.errno,
@@ -2690,6 +2698,28 @@ class tc_c(object):
               code which will be instantiated in another class without
               it being confused with a testcase.
 
+    :param str name: the name of the testcase
+    :param str tc_file_path: the path to the file where the testcase
+      was found
+    :param str origin: the origin of the testcase (in most cases this
+      is a string *FILENAME:LINE*)
+
+    Note that in the most cases, the three arguments will be the same,
+    as the name of the testcase will be the same as the path where the
+    test case is found and if there is only one testcase per file, the
+    origin is either line 1 or no line.
+
+    When a file contains specifies multiple testcases, then they can
+    be created such as:
+
+     - name TCFILEPATH#TCCASENAME
+     - tc_file_path TCFILEPATH
+     - origin TCFILEPATH:LINENUMBER (matching the line number where
+       the subcase is specified)
+
+    this allows a well defined namespace in which cases from multiple
+    files that are run at the same time don't conflict in name.
+
     The runner will call the testcase methods to evaluate the test;
     any failure/blockage causes the evaluation to stop and move on to
     the next testcase:
@@ -2796,7 +2826,7 @@ class tc_c(object):
     """
 
     #
-    # Public testcase interface
+    # Public testcase API/interface
     #
 
     #: List of places where we declared this testcase is build only
@@ -2850,8 +2880,9 @@ class tc_c(object):
         self._kw_set("thisfile", thisfile)
 
         #: Expect loop to wait for things to happen
-        self.tls.expect_timeout = 60
-        # FIXME: alias self.tls.expecter.timeout for backwards compat
+        self.tls.expecter = expecter.expecter_c(self._expecter_log, self,
+                                                poll_period = poll_period,
+                                                timeout = 60)
         # Ticket ID for this testcase / target group
         self.ticket = None
         # The group of targets where the TC is running
@@ -3021,10 +3052,9 @@ class tc_c(object):
         have. We use it when we clone the object to run in a target
         group or when we spawn threads to run methods in parallel.
         """
-        self.tls.buffers = {}
-        self.tls._expectations = []
-        if tls_parent:
-            self.tls.expect_timeout = tls_parent.expect_timeout
+        self.tls.expecter = expecter.expecter_c(
+            self._expecter_log, self, poll_period = poll_period,
+            timeout = expecter_parent.timeout)
 
     def is_static(self):
         """
@@ -3033,6 +3063,29 @@ class tc_c(object):
         """
         return not self._targets
 
+
+    #: Number of characters in the testcase's :term:`hash`
+    #:
+    #: The testcase's *HASHID* is a unique identifier to identify a
+    #: testcase the group of test targets where it ran.
+    #:
+    #: This defines the lenght of such hash; before it used 4 to be
+    #: four but once over 40k testcases are being run, conflicts start
+    #: to pop up, where more than one testcase/target combo maps to
+    #: the same hash.
+    #:
+    #:  32 ^ 4 = 1048576 unique combinations
+    #:
+    #:  32 ^ 6 = 1073741824 unique combinations
+    #:
+    #: 6 chars offers a keyspace 1024 times larger with base32 than
+    #: 4 chars. Base64 increases the amount, but not that much
+    #: compared to the ease of confusion between caps and non caps.
+    #:
+    #: So it has been raised to 6.
+    #:
+    #: FIXME: add a registry to warn of used ids
+    hashid_len = 6
 
     # Reporting interface FIXME: document
     def report_pass(self, message, attachments = None,
@@ -3183,6 +3236,26 @@ class tc_c(object):
                                attachments)
         return r
 
+    def relpath_to_abs(self, path):
+        """
+        Given a path relative to the test script's source, make it absolute.
+
+        .. admonition: example
+
+           If the testscript calling this API (as given by
+           ``testcase.kws['srcdir_abs']`` is
+           ``/some/path/test_file.py`` and this is given as
+           ``subdir/somefile``, then the source will be considered to
+           be ``/some/path/subdir/somefile``
+
+        @returns string with the absolutized path if relative, the
+          same if already absolute
+
+        """
+
+        if os.path.isabs(path):
+            return path
+        return os.path.join(self.kws['srcdir_abs'], path)
 
     def shcmd_local(self, cmd, origin = None, reporter = None,
                     logfile = None):
@@ -4927,9 +5000,31 @@ class tc_c(object):
                     continue
                 raise
 
+    #: Maximum time (seconds) to wait to succesfully acquire a set of targets
+    #:
+    #: In heavily contented scenarios or large executions, this
+    #: becomes oversimplistic and not that useful and shall be
+    #: delegated to something like Jenkins timing out after so long
+    #: running things.
+    #:
+    #: In that case set it to over that timeout (eg: 15 hours); it'll
+    #: keep trying to assign until killed; in a tcf :ref:`configuration
+    #: file <tcf_client_configuration>`, add:
+    #:
+    #: >>> tcfl.tc.tc_c.assign_timeout = 15 * 60 * 60
+    #:
+    #: or even in the testcase itself, before it assigns (in build or
+    #: config methods)
+    #:
+    #: >>> self.assign_timeout = 15 * 60 * 60    
+    assign_timeout = 1000
+
     # FIXME: add phase "assign"
     @contextlib.contextmanager
-    def _targets_assign(self, timeout = 1000, period = assign_period):
+    def _targets_assign(self):
+        timeout = self.assign_timeout
+        period = assign_period
+
         if self.is_static():
             yield
             return
@@ -5873,7 +5968,8 @@ class tc_c(object):
                             if self.target_group else 'n/a'
         if ticket == None:
             self.ticket = msgid_c.encode(
-                self._hash_salt + self.name + target_group_name, 4)
+                self._hash_salt + self.name + target_group_name,
+                self.hashid_len)
         else:
             self.ticket = self._ident
 
@@ -5902,7 +5998,7 @@ class tc_c(object):
             global log_dir
             self.report_file_prefix = os.path.join(
                 log_dir, "report-%(runid)s:%(tc_hash)s." % self.kws)
-            with msgid_c(self.ticket, depth = 1, l = 4) as msgid:
+            with msgid_c(self.ticket, depth = 1, l = self.hashid_len) as msgid:
                 self._ident = msgid_c.ident()
                 try:
                     self.report_info("will run on target group '%s'"
@@ -5938,7 +6034,7 @@ class tc_c(object):
         except Exception as e:
             # This msgid_c context is a hack so that this exception
             # report has a proper RUNID and HASH prefix
-            with msgid_c(self.ticket, depth = 0, l = 4) as msgid:
+            with msgid_c(self.ticket, depth = 0, l = self.hashid_len) as msgid:
                 self.report_blck(
                     "BUG exception: %s %s" % (type(e).__name__, e),
                     { 'exception info': traceback.format_exc() },
@@ -6040,7 +6136,182 @@ class tc_c(object):
         c = copy.copy(self)
         c.__init_shallow__(self)
         c._prefix_update()
+<<<<<<< HEAD
+=======
+        c.tls = threading.local()
+        c._cleanup_files = set()
+        c.tls.expecter = expecter.expecter_c(
+            c._expecter_log, c, poll_period = poll_period,
+            timeout = self.tls.expecter.timeout)
+>>>>>>> master
         return c
+
+    @result_c.from_exception
+    def _permutations_make(self, rt_all, rt_selected, ic_selected):
+        # FIXME: maybe move this to __init__
+        self._methods_prepare()	# setup phase running methods
+        self.rt_all = rt_all
+        if self.is_static():
+            if self._dry_run:
+                self.report_info("will run")
+            rt_selected = { 'local': rt_all['local']['bsp_models'].keys() }
+            ic_selected = { }
+
+        # This will be now testcase-specific, so make a deep copy
+        # so it can be modified by the testcase -- note we might alter
+        # FIXME: note we might not need this deep coy --
+        # verify once the reorg is done
+        self.rt_selected = copy.deepcopy(rt_selected)
+        self.ic_selected = copy.deepcopy(ic_selected)
+
+        # list candidates to interconnects
+        #
+        # We requested R interconnects [len(self._interconnects)] and we
+        # have ic_selected as candidates for those interconnects. Each
+        # interconnect requested might put restrictons to which
+        # interconnects can be used. So in ic_candidates, return which of
+        # ic_selected can be used for each interconnect.
+        self.report_info("interconnect groups: finding remote ic targets",
+                         dlevel = 6)
+        ic_candidates = self._target_wants_find_candidates(
+            self._interconnects, ic_selected)
+        self.report_info("interconnect groups: available remote ic "
+                         "targets: %s" % self._selected_str(ic_selected),
+                         dlevel = 5)
+        # The list of candidates to interconnects could be arranged in
+        # different ways. Permutations will make it grow quick. If IC0 =
+        # {AB}, IC1={ABC} and IC2={ABC}, there is an upper ceiling of
+        # N!/(N-R)!, where R is the number of interconnects and N is the
+        # max number of available candidates (len(ic_selected) (the real
+        # ceiling will be lower as this is not a pure permutation
+        # problem--some of the sets of candidates don't include all the
+        # available N candidates in ic_selected and I don't really know if
+        # there is a math way to compute it -- internet got too dense for
+        # my limited set theory knowledge quite quick).
+        #
+        # So we are just going to generate a few at random; if we only have
+        # one interconnect, we'll try to get one for each type of
+        # interconnect. Otherwise we use the command line to limit the
+        # amount of IC groups we create.
+        if len(self._interconnects) == 1:
+            ic_want_name = list(self._interconnects)[0]
+            max_permutations = \
+                len(self._rt_types(ic_candidates[ic_want_name]))
+        else:
+            # FIXME: get from command line and defaults
+            max_permutations = 10
+        self.report_info("interconnect groups: generating %d by "
+                         "permuting remote ic targets" %
+                         max_permutations, dlevel = 6)
+        ic_permutations = self._target_wants_list_permutations(
+            ic_candidates, max_permutations, tag = "interconnect")
+        if len(self._interconnects):
+            if len(ic_permutations) == 0:
+                type(self).class_result += result_c(0, 0, 0, 0, 1)
+                raise skip_e("WARNING! No interconnects available")
+        elif len(self._interconnects) == 0:
+            # Cheat, when we don't use interconnects, just define an empty
+            # one so we enter into the loop below
+            ic_permutations = { "all": { } }
+        for icgid, icg in ic_permutations.iteritems():
+            self.report_info("interconnect group %s: %s"
+                             % (icgid, self._tg_str(icg)), dlevel = 5)
+
+
+        # FIXME: now filter them
+
+        # Now that we have a set of interconnect permutations, we need
+        # to select, for each, which targets fit in the permutation
+        # Basically, this is a simple OR, if the target is in any of
+        # the interconnects, it's good to go.
+        self.report_info("interconnect groups: finding remote "
+                         "targets available for each",
+                         dlevel = 6)
+        icg_selected = collections.defaultdict(dict)
+        for icgid, icg in ic_permutations.iteritems():
+            for icwn, (rtic, _) in icg.iteritems():
+                rtic_id = self.rt_all[rtic]['id']
+                for rt_full_id, bsp_models in rt_selected.iteritems():
+                    rt = self.rt_all[rt_full_id]
+                    if rtic_id in rt.get('interconnects', {}):
+                        icg_selected[icgid][rt_full_id] = bsp_models
+            if icgid == "all":	# No interconnects, take'em all
+                icg_selected[icgid] = dict(rt_selected)
+
+            if not icg_selected[icgid]:
+                type(self).class_result += result_c(0, 0, 0, 0, 1)
+                self.report_skip(
+                    "interconnect group %s (%s): no targets can be used!!"
+                    % (icgid, self._tg_str(icg)), dlevel = 3)
+            else:
+                self.report_info(
+                    "interconnect group %s (%s): candidate targets "
+                    "available: %s" %
+                    (icgid, self._tg_str(icg),
+                     self._selected_str(icg_selected[icgid])),
+                    dlevel = 4)
+
+        # So now icg_selected is a dict, keyed by interconnet
+        # group name, which contains the remote targets that are
+        # valid candidates to be used for that interconnect group
+        # (so they satisfy the condition of being in any of the
+        # interconnects that are required for the group).
+        #
+        # So now, for each of those interconnect groups we need to
+        # generate a list of target groups.
+        self.report_info("interconnect groups: generating target "
+                         "groups for each", dlevel = 6)
+        rt_candidates = {}
+        rt_permutations = {}
+        target_want_list = set(self._targets.keys()) - self._interconnects
+        for icgid, rt_selected in icg_selected.iteritems():
+            # Generate keywords that describe the current
+            # interconnects
+            kws_ics = dict()
+            for icwn, ic in ic_permutations[icgid].iteritems():
+                commonl.kws_update_from_rt(kws_ics, self.rt_all[ic[0]],
+                                           prefix = icwn + ".")
+            # list candidates to targets in this interconnect group
+            self.report_info("interconnect group %s: "
+                             "finding remote target candidates" %
+                             icgid, dlevel = 8)
+            rt_candidates = self._target_wants_find_candidates(
+                target_want_list, rt_selected, kws_ics)
+            self.report_info("interconnect group %s: "
+                             "remote target candidates: %s"
+                             % (icgid, pprint.pformat(rt_candidates)),
+                             dlevel = 7)
+
+            # Generate permutations of targets wants vs available
+            # targets for this interconnect group
+            if len(target_want_list) == 1:
+                twn = list(target_want_list)[0]
+                max_permutations = len(self._rt_types(rt_candidates[twn]))
+            else:
+                max_permutations = tc_c.max_permutations
+
+            self.report_info("interconnect group %s: generating "
+                             "target groups" % icgid, dlevel = 6)
+            tgs = self._target_wants_list_permutations(
+                rt_candidates, max_permutations, name_prefix = icgid)
+            if tgs:
+                for tgid, tg in tgs.iteritems():
+                    rt_permutations[(icgid, tgid)] = tg
+            elif len(self._targets) == 0: # static TC
+                ic_permutations["localic"] = {}
+                rt_permutations = { ("localic", "localtg") : {} }
+            elif len(target_want_list) == 0: # only ICs?
+                self.report_info("interconnect group %s: "
+                                 "no targets needed" % (icgid),
+                                 dlevel = 4)
+                # FIXME: fix so if tgid == None, nothjing is printed
+                rt_permutations[(icgid, None)] = {}
+            else:
+                self.report_info("interconnect group %s: "
+                                 "not enough targets" % (icgid),
+                                 dlevel = 4)
+        return ic_permutations, rt_permutations
+
 
     @result_c.from_exception
     def _run_on_targets(self, tp, rt_all, rt_selected, ic_selected):
@@ -6074,168 +6345,8 @@ class tc_c(object):
         try:
             threads = []
 
-            # FIXME: maybe move this to __init__
-            self._methods_prepare()	# setup phase running methods
-            self.rt_all = rt_all
-            if self.is_static():
-                if self._dry_run:
-                    self.report_info("will run")
-                rt_selected = { 'local': rt_all['local']['bsp_models'].keys() }
-                ic_selected = { }
-
-            # This will be now testcase-specific, so make a deep copy
-            # so it can be modified by the testcase -- note we might alter
-            # FIXME: note we might not need this deep coy --
-            # verify once the reorg is done
-            self.rt_selected = copy.deepcopy(rt_selected)
-            self.ic_selected = copy.deepcopy(ic_selected)
-
-            # list candidates to interconnects
-            #
-            # We requested R interconnects [len(self._interconnects)] and we
-            # have ic_selected as candidates for those interconnects. Each
-            # interconnect requested might put restrictons to which
-            # interconnects can be used. So in ic_candidates, return which of
-            # ic_selected can be used for each interconnect.
-            self.report_info("interconnect groups: finding remote ic targets",
-                             dlevel = 6)
-            ic_candidates = self._target_wants_find_candidates(
-                self._interconnects, ic_selected)
-            self.report_info("interconnect groups: available remote ic "
-                             "targets: %s" % self._selected_str(ic_selected),
-                             dlevel = 5)
-            # The list of candidates to interconnects could be arranged in
-            # different ways. Permutations will make it grow quick. If IC0 =
-            # {AB}, IC1={ABC} and IC2={ABC}, there is an upper ceiling of
-            # N!/(N-R)!, where R is the number of interconnects and N is the
-            # max number of available candidates (len(ic_selected) (the real
-            # ceiling will be lower as this is not a pure permutation
-            # problem--some of the sets of candidates don't include all the
-            # available N candidates in ic_selected and I don't really know if
-            # there is a math way to compute it -- internet got too dense for
-            # my limited set theory knowledge quite quick).
-            #
-            # So we are just going to generate a few at random; if we only have
-            # one interconnect, we'll try to get one for each type of
-            # interconnect. Otherwise we use the command line to limit the
-            # amount of IC groups we create.
-            if len(self._interconnects) == 1:
-                ic_want_name = list(self._interconnects)[0]
-                max_permutations = \
-                    len(self._rt_types(ic_candidates[ic_want_name]))
-            else:
-                # FIXME: get from command line and defaults
-                max_permutations = 10
-            self.report_info("interconnect groups: generating %d by "
-                             "permuting remote ic targets" %
-                             max_permutations, dlevel = 6)
-            ic_permutations = self._target_wants_list_permutations(
-                ic_candidates, max_permutations, tag = "interconnect")
-            if len(self._interconnects):
-                if len(ic_permutations) == 0:
-                    type(self).class_result += result_c(0, 0, 0, 0, 1)
-                    raise skip_e("WARNING! No interconnects available")
-            elif len(self._interconnects) == 0:
-                # Cheat, when we don't use interconnects, just define an empty
-                # one so we enter into the loop below
-                ic_permutations = { "all": { } }
-            for icgid, icg in ic_permutations.iteritems():
-                self.report_info("interconnect group %s: %s"
-                                 % (icgid, self._tg_str(icg)), dlevel = 5)
-
-
-            # FIXME: now filter them
-
-            # Now that we have a set of interconnect permutations, we need
-            # to select, for each, which targets fit in the permutation
-            # Basically, this is a simple OR, if the target is in any of
-            # the interconnects, it's good to go.
-            self.report_info("interconnect groups: finding remote "
-                             "targets available for each",
-                             dlevel = 6)
-            icg_selected = collections.defaultdict(dict)
-            for icgid, icg in ic_permutations.iteritems():
-                for icwn, (rtic, _) in icg.iteritems():
-                    rtic_id = self.rt_all[rtic]['id']
-                    for rt_full_id, bsp_models in rt_selected.iteritems():
-                        rt = self.rt_all[rt_full_id]
-                        if rtic_id in rt.get('interconnects', {}):
-                            icg_selected[icgid][rt_full_id] = bsp_models
-                if icgid == "all":	# No interconnects, take'em all
-                    icg_selected[icgid] = dict(rt_selected)
-
-                if not icg_selected[icgid]:
-                    type(self).class_result += result_c(0, 0, 0, 0, 1)
-                    self.report_skip(
-                        "interconnect group %s (%s): no targets can be used!!"
-                        % (icgid, self._tg_str(icg)), dlevel = 3)
-                else:
-                    self.report_info(
-                        "interconnect group %s (%s): candidate targets "
-                        "available: %s" %
-                        (icgid, self._tg_str(icg),
-                         self._selected_str(icg_selected[icgid])),
-                        dlevel = 4)
-
-            # So now icg_selected is a dict, keyed by interconnet
-            # group name, which contains the remote targets that are
-            # valid candidates to be used for that interconnect group
-            # (so they satisfy the condition of being in any of the
-            # interconnects that are required for the group).
-            #
-            # So now, for each of those interconnect groups we need to
-            # generate a list of target groups.
-            self.report_info("interconnect groups: generating target "
-                             "groups for each", dlevel = 6)
-            rt_candidates = {}
-            rt_permutations = {}
-            target_want_list = set(self._targets.keys()) - self._interconnects
-            for icgid, rt_selected in icg_selected.iteritems():
-                # Generate keywords that describe the current
-                # interconnects
-                kws_ics = dict()
-                for icwn, ic in ic_permutations[icgid].iteritems():
-                    commonl.kws_update_from_rt(kws_ics, self.rt_all[ic[0]],
-                                               prefix = icwn + ".")
-                # list candidates to targets in this interconnect group
-                self.report_info("interconnect group %s: "
-                                 "finding remote target candidates" %
-                                 icgid, dlevel = 8)
-                rt_candidates = self._target_wants_find_candidates(
-                    target_want_list, rt_selected, kws_ics)
-                self.report_info("interconnect group %s: "
-                                 "remote target candidates: %s"
-                                 % (icgid, pprint.pformat(rt_candidates)),
-                                 dlevel = 7)
-
-                # Generate permutations of targets wants vs available
-                # targets for this interconnect group
-                if len(target_want_list) == 1:
-                    twn = list(target_want_list)[0]
-                    max_permutations = len(self._rt_types(rt_candidates[twn]))
-                else:
-                    max_permutations = tc_c.max_permutations
-
-                self.report_info("interconnect group %s: generating "
-                                 "target groups" % icgid, dlevel = 6)
-                tgs = self._target_wants_list_permutations(
-                    rt_candidates, max_permutations, name_prefix = icgid)
-                if tgs:
-                    for tgid, tg in tgs.iteritems():
-                        rt_permutations[(icgid, tgid)] = tg
-                elif len(self._targets) == 0: # static TC
-                    ic_permutations["localic"] = {}
-                    rt_permutations = { ("localic", "localtg") : {} }
-                elif len(target_want_list) == 0: # only ICs?
-                    self.report_info("interconnect group %s: "
-                                     "no targets needed" % (icgid),
-                                     dlevel = 4)
-                    # FIXME: fix so if tgid == None, nothjing is printed
-                    rt_permutations[(icgid, None)] = {}
-                else:
-                    self.report_info("interconnect group %s: "
-                                     "not enough targets" % (icgid),
-                                     dlevel = 4)
+            ic_permutations, rt_permutations = self._permutations_make(
+                rt_all, rt_selected, ic_selected)
 
             # So now we are going to iterate over all the groups
             for (icgid, tgid), tg in rt_permutations.iteritems():
@@ -6247,6 +6358,11 @@ class tc_c(object):
                         tg_name = tgid
                     else:
                         tg_name = "%s-%s" % (icgid, tgid)
+                # create a representation of the name that indicates
+                # the twn/role, such as
+                #
+                # ic=SERVER1/nwa target=SERVER2/target2 target2=SERVER1/target3
+                icg = ic_permutations[icgid]
                 strs = []
                 icg_str = self._tg_str(icg)
                 if len(icg_str):
@@ -6259,12 +6375,12 @@ class tc_c(object):
                 group_str = " ".join(strs)
                 del strs
 
-                icg = ic_permutations[icgid]
                 tc_for_tg = self._clone()
                 if self._dry_run:
                     self.report_info("will run on target group '%s'"
                                      % group_str, dlevel = 1)
                     continue
+
                 # FIXME: this order could be better
                 target_group = target_group_c(group_str)
                 # Ids of the interconnect targets we'll be using
@@ -6430,26 +6546,50 @@ class tc_c(object):
                 raise AssertionError(
                     "%s: unknown # of arguments %d to is_testcase()"
                     % (_tc_driver, len(argspec.args)))
-            
+
+        def _is_testcase_call(tc_driver, file_name, from_path):
+            style = _style_get(tc_driver)
+            # hack to support multiple versions of the interface
+            if style == 2:
+                return tc_driver.is_testcase(file_name)
+            elif style == 3:
+                return tc_driver.is_testcase(file_name, from_path)
+            raise AssertionError("bad style %d" % style)
+
         for _tc_driver in cls._tc_drivers:
             tc_instances = []
-            try:
-                style = _style_get(_tc_driver)
-                # hack to support multiple versions of the interface
-                if style == 2:
-                    tc_instances += _tc_driver.is_testcase(file_name)
-                elif style == 3:
-                    tc_instances += _tc_driver.is_testcase(file_name,
-                                                           from_path)
-            except Exception as e:
-                tc_fake = tc_c(file_name, file_name, "builtin")
-                tc_fake.mkticket()
-                with msgid_c(tc_fake.ticket, depth = 1, l = 4) as _msgid:
-                    tc_fake._ident = msgid_c.ident()
+            # new one all the time, in case we use it and close it
+            tc_fake = tc_c(file_name, file_name, "builtin")
+            tc_fake.mkticket()
+            tc_fake._ident = msgid_c.ident()
+            with msgid_c(tc_fake.ticket, depth = 1, l = cls.hashid_len) \
+                 as _msgid:
+                try:
+                    tc_instances += _is_testcase_call(_tc_driver,
+                                                      file_name, from_path)
+                # this is so ugly, need to merge better with result_c's handling
+                except subprocess.CalledProcessError as e:
+                    retval = result_c.from_exception_cpe(tc_fake, e)
+                    tc_fake.finalize(retval)
+                    result += retval
+                    continue
+                except OSError as e:
+                    attachments = dict(
+                        errno = e.errno,
+                        strerror = e.strerror
+                    )
+                    if e.filename:
+                        attachments['filename'] = e.filename
+                    retval = result_c.report_from_exception(tc_fake, e,
+                                                            attachments)
+                    tc_fake.finalize(retval)
+                    result += retval
+                    continue
+                except Exception as e:
                     retval = result_c.report_from_exception(tc_fake, e)
                     tc_fake.finalize(retval)
                     result += retval
-                continue
+                    continue
 
             if not tc_instances:
                 continue
@@ -6658,7 +6798,7 @@ def testcases_discover(tcs_filtered, args):
             tcs_filtered[tc_path] = tc
         except exception as e:
             tc.mkticket()
-            with msgid_c(tc.ticket, l = 4) as _msgid:
+            with msgid_c(tc.ticket, l = tc_c.hashid_len) as _msgid:
                 tc._ident = msgid_c.ident()
                 result += result_c.report_from_exception(tc, e)
 
@@ -6981,7 +7121,7 @@ def _run(args):
         tc_c.jobs = len(tcs_filtered)
         for tc in tcs_filtered.values():
             tc.mkticket()
-            with msgid_c(tc.ticket, l = 4) as _msgid:
+            with msgid_c(tc.ticket, l = tc_c.hashid_len) as _msgid:
                 tc._ident = msgid_c.ident()
                 _threads = tc._run_on_targets(tp, rt_all,
                                               rt_selected, ic_selected)
@@ -7011,7 +7151,7 @@ def _run(args):
                 continue
             else:
                 seen_classes.add(cls)
-                with msgid_c(tc.ticket, l = 4, depth = 0,
+                with msgid_c(tc.ticket, l = tc_c.hashid_len, depth = 0,
                              phase = "class_teardown") as _msgid:
                     result += tc._class_teardowns_run()
         # If something failed or blocked, report totals verbosely

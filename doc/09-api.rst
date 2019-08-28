@@ -301,8 +301,8 @@ Driver / targe type specific metadata
 Provisioning OS specific metadata
 ---------------------------------
 
-- *linux_serial_console_default*: which device is the system's serial
-  console connected to TCF's first console.
+- *linux_serial_console_default*: which device **the target** sees as
+  the system's serial console connected to TCF's first console.
 
   If *DEVICE* (eg: ttyS0) is given, Linux will be booted with the
   argument *console=DEVICE,115200*.
@@ -345,6 +345,16 @@ Provisioning OS specific metadata
   not present, the first BSP (in alphabetical order) declared in the
   target tags ``bsps`` will be used.
 
+.. _pos_image:
+
+- *pos_image*: string describing the image used to boot the target in
+  POS mode; defaults to *tcf-live*.
+
+  For each image, in the server, :data:`ttbl.dhcp.pos_cmdline_opts`
+  describes the kernel options to append to the kernel image, which is
+  expected to be found in *http://:data:`POS_HTTP_URL_PREFIX
+  <pos_http_url_prefix>`/vmlinuz-POS_IMAGE*
+
 .. _uefi_boot_manager_ipv4_regex:
 
 - *uefi_boot_manager_ipv4_regex*: allows specifying a Python regular
@@ -369,6 +379,9 @@ Provisioning OS specific metadata
 ====================================
 
 .. automodule:: conf_00_lib
+   :members:
+   :undoc-members:
+.. automodule:: conf_00_lib_pdu
    :members:
    :undoc-members:
 
@@ -419,6 +432,7 @@ Power Control Interface
 .. autoclass:: ttbl.tt_power_control_mixin
 .. automodule:: ttbl.dhcp
 .. automodule:: ttbl.pc
+.. automodule:: ttbl.raritan_emx
 .. automodule:: ttbl.pc_ykush
 .. automodule:: ttbl.rsync
 .. automodule:: ttbl.socat
@@ -439,3 +453,5 @@ Common helper library
 .. automodule:: commonl.expr_parser
 
 .. automodule:: commonl.tcob
+
+.. include:: 09-api-LL-extras.rst

@@ -389,7 +389,9 @@ Create a configuration file
 configuration statements as described in the links below:
 
 - :py:func:`Digital Loggers Web Power Switch 7
-  <conf_00_lib.dlwps7_add>` wall-power switch.
+  <conf_00_lib.dlwps7_add>` PDUs / wall-power switches
+- :py:func:`Raritan EMX
+  <conf_00_lib_pdu.raritan_emx_add>` based PDUs  / wall-power switches
 - :py:func:`YKUSH USB power switches <conf_00_lib.ykush_targets_add>`
   USB data/power switchable hub
 - :py:func:`Devantech USB-RLY08B USB controlled relays
@@ -935,7 +937,7 @@ c. Make the kernel and initrd for POS available via Apache for
          # dracut -v -H --kver $(ls /home/ttbd/images/tcf-live/x86_64/lib/modules) \
                 -k /home/ttbd/images/tcf-live/x86_64/lib/modules/* \
                --kernel-image /home/ttbd/images/tcf-live/x86_64/boot/vmlinuz-* \
-               --add-drivers "igb r8169 virtio_net ftdi_sio" \
+               --add-drivers "igb e1000e r8169 virtio_net ftdi_sio" \
                -m "nfs base network kernel-modules kernel-network-modules" \
                /home/ttbd/public_html/x86_64/initramfs-tcf-live
 
@@ -947,7 +949,7 @@ c. Make the kernel and initrd for POS available via Apache for
        needed drivers:
        
        - *ftdi_sio* drivers for FTDI USB serial ports
-       - *igb* Intel Gigabit adapters
+       - *igb*, *e1000e* Intel adapters
        - *r8169* for some Realtek network cards
        - *virtio* for running under QEMU
 

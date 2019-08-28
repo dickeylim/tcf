@@ -19,6 +19,7 @@ import pprint
 import re
 
 import tc
+import target_ext_shell
 import tl
 
 boot_entries_ignore = [
@@ -370,6 +371,9 @@ def _linux_boot_guess(target, image):
 
 
 pos_boot_names = [
+    # UEFI Network
+    # UEFI Network N
+    re.compile(r"^UEFI Network(\s+[0-9]+)?$"),
     # UEFI: PXE IP[46].*
     # UEFI PXEv[46].*
     re.compile(r"^UEFI:?\s+PXE[v ](IP)?[46].*$"),
@@ -380,9 +384,12 @@ pos_boot_names = [
     re.compile(r"^UEFI\s?:( LAN :)? (IP|PXE IP)[46].*$"),
 ]
 
-local_boot_names = [
+tcf_local_boot_names = [
     # TCF Localboot v2
     re.compile("^TCF Localboot v2$"),
+]
+
+local_boot_names = [
     # UEFI : INTEL SSDPEKKW010T8 : PART 0 : OS Bootloader
     # UEFI : SATA : PORT 0 : INTEL SSDSC2KW512G8 : PART 0 : OS Bootloader
     # UEFI : M.2 SATA :INTEL SSDSCKJF240A5 : PART 0 : OS Bootloader
@@ -391,6 +398,12 @@ local_boot_names = [
 
 def _name_is_pos_boot(name):
     for regex in pos_boot_names:
+        if regex.search(name):
+            return True
+    return False
+
+def _name_is_tcf_local_boot(name):
+    for regex in tcf_local_boot_names:
         if regex.search(name):
             return True
     return False
@@ -422,6 +435,9 @@ def _efibootmgr_output_parse(target, output):
     for entry in entry_matches:
         if _name_is_pos_boot(entry[1]):
             section = 0		# POS (PXE, whatever), boot first
+        elif _name_is_tcf_local_boot(entry[1]):
+            section = 05	# TCF local boots, always first so we
+                                # can control
         elif _name_is_local_boot(entry[1]):
             section = 10	# LOCAL, boot after
         else:
@@ -440,14 +456,19 @@ efi_entries_to_remove = [
     "Linux bootloader",
     "ACRN",
     "debian",
+    "Linux bootloader",
+    "Linux Boot Manager",
+    "Windows Boot Manager",
+    "ubuntu"
 ]
 
 def _efibootmgr_ponder(target, output):
     boot_order, boot_entries = _efibootmgr_output_parse(target, output)
 
     # boot_entries has been sorted as it is in the current
-    # efibootmanager, and classified each entry in [2] as POS, LOCAL
-    # or leftover. We want POS, then LOCAL, then the rest.
+    # efibootmanager, and classified each entry in [2] as POS,
+    # TCF-LOCAL, LOCAL or leftover. We want POS, then TCF-LOCAL, then
+    # LOCAL, then the rest.
 
     # We want the same order being kept--why? Because some EFIs keep
     # rearranging it, unknown why and if we keep updating they end up
@@ -810,5 +831,53 @@ def boot_config_fix(target):
     # In the case of UEFI systems, this booted into a OS because the
     # EFI bootmgr order got munged, so let's try to get that fixed
     # (IPv4 and IPv6 boot first).
-    target.shell.up(user = 'root')
-    _efibootmgr_setup(target, target.kws['pos_boot_dev'], 1)
+    prompt_orig = target.shell.shell_prompt_regex
+    try:
+        # get the super-generic prompt -- not a really good fix, but
+        # will do for now
+        target.shell.shell_prompt_regex = target_ext_shell._shell_prompt_regex
+        target.shell.up(user = 'root')
+
+        # Some drivers disable efibootmgr to avoid the boot order
+        # being changed without control--in said case, hack to use the
+        # disabled version so we can actually fix things.
+        # note alias is a POSIX
+        # https://pubs.opengroup.org/onlinepubs/9699919799/utilities/alias.html
+        # utility, so shall be available in most shells
+        target.shell.run(
+            "test -x /usr/bin/efibootmgr.disabled"
+            " && alias efibootmgr=/usr/bin/efibootmgr.disabled || true")
+        # Clean house
+        output = target.shell.run("efibootmgr", output = True)
+        _boot_order, boot_entries = \
+            _efibootmgr_output_parse(target, output)
+        removed = []
+        kept = []
+        target.report_info("boot order: %s" %  ",".join(_boot_order),
+                           attachments = dict(
+                               boot_entries =
+                               pprint.pformat(boot_entries)
+                           ))
+        for entry, name, category, _index in boot_entries:
+            if name in efi_entries_to_remove:
+                target.shell.run("efibootmgr -b %s -B" % entry)
+                if entry in _boot_order:
+                    target.report_info(
+                        "removed %s %s: %s"
+                        %  (entry, name,  _boot_order), dlevel = -1)
+                    removed.append("%s:%s" % (entry, name))
+                    _boot_order.remove(entry)
+                else:
+                    kept.append("%s:%s" % (entry, name))
+            target.report_info("boot order after checking %s/%s %s: %s"
+                               % (entry, category, name,
+                                  ",".join(_boot_order)))
+        output = target.shell.run("efibootmgr -o %s" % ",".join(_boot_order),
+                                  output = True, trim = True)
+        target.report_info(
+            "EFI boot order RECOVERY executed",
+            dict(boot_order = "\n".join(kept), removed = "\n".join(removed),
+                 alevel = -1, level = -1))
+        _efibootmgr_setup(target, target.kws['pos_boot_dev'], 1)
+    finally:
+        target.shell.shell_prompt_regex = prompt_orig

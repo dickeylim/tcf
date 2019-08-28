@@ -37,6 +37,7 @@ evertything:
 .. automodule:: examples.test_pos0_base
 .. automodule:: examples.test_pos_deploy
 .. automodule:: examples.test_pos_deploy_2
+.. automodule:: examples.test_pos_boot
 .. automodule:: examples.test_deploy_files
 
 Capturing data, doing SSH
@@ -44,6 +45,7 @@ Capturing data, doing SSH
 
 .. automodule:: examples.test_audio_capture
 .. automodule:: examples.test_ssh_in
+.. automodule:: examples.test_linux_ssh
 
 .. _finding_testcase_metadata:
 
@@ -98,6 +100,15 @@ provides access to functions to set TCF's configuration.
 You can add new paths to parse with ``--config-path`` and force
 specific files to be read with ``--config-file``. See *tcf --help*.
 
+How do I list which targets I own?
+----------------------------------
+
+Run::
+
+  $ tcf list -v 'owner:"MYNAME"'
+
+*MYNAME* is whatever identifier you used to login.
+
 .. _howto_release_target:
 
 How do I release a target I don't own?
@@ -120,6 +131,17 @@ As a user, you can always force release any of your own locks with
 `-f` or with `-t TICKETSTRING`::
 
   $ tcf -t TICKETSTRING release TARGETNAME
+
+How do I release all the targets I own?
+---------------------------------------
+
+Run::
+
+  $ tcf release -f $(tcf list 'owner:"MYNAME"')
+
+- *MYNAME* is whatever identifier you used to login
+- *tcf list 'owner:"MYNAME"'* lists which targets you currently own
+
 
 How do I keep a target(s) reserved and powered-on while I fuzz with them?
 -------------------------------------------------------------------------
@@ -506,6 +528,11 @@ Tunnels can also be created with the command line::
 
 Note you might need first the steps in the next section to allow SSH
 to login with a passwordless root.
+
+Linux targets: restarting the SSH daemon
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+See the examples in :func:`tcfl.tl.linux_ssh_root_nopwd`.
 
 .. _target_pos_manually:
 

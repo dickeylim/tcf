@@ -266,6 +266,8 @@ class shell(tc.target_extension_c):
                                           skip_duplicate = True
             )
 
+        # don't set a timeout here, leave it to whatever it was defaulted
+
 
     def _run(self, cmd = None, expect = None, prompt_regex = None,
              output = False, output_filter_crlf = True, trim = False):
